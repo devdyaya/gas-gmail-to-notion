@@ -85,7 +85,7 @@ function parseMail(body) {
   };
 }
 
-// Notion APIリクエストの共通処理（ここに集約!）
+// Notion APIリクエストの共通処理
 function notionFetch(method, path, token, payload) {
   const options = {
     method: method,
