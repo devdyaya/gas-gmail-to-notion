@@ -19,6 +19,9 @@ function processAssignMails() {
     return;
   }
 
+  // この実行内でアーカイブしたUUIDを記録（同一実行内の復活防止）
+  const archivedUuids = new Set();
+
   threads.forEach(thread => {
     let allOk = true;
 
@@ -26,9 +29,25 @@ function processAssignMails() {
       const data = parseMail(message.getPlainBody());
 
       if (data && data.name) {
-        const ok = data.isDelete
-          ? archiveFromNotion(NOTION_TOKEN, NOTION_DB_ID, data)
-          : upsertToNotion(NOTION_TOKEN, NOTION_DB_ID, data);
+        let ok;
+        if (data.isDelete) {
+          // 削除 → アーカイブ
+          ok = archiveFromNotion(NOTION_TOKEN, NOTION_DB_ID, data);
+          if (data.uuid) archivedUuids.add(data.uuid);
+        } else if (data.uuid && archivedUuids.has(data.uuid)) {
+          // この実行内で既に削除済みのUUID → 復活させない
+          Logger.log('同一実行内で削除済みのためスキップ: ' + data.name);
+          ok = true;
+        } else if (isMyInterview(data)) {
+          // アサイン/変更 かつ 自分が担当
+          // アサインメールのときだけ新規作成を許可（変更は更新のみ）
+          ok = upsertToNotion(NOTION_TOKEN, NOTION_DB_ID, data, data.isAssign);
+        } else {
+          // 担当外
+          Logger.log('担当外のためスキップ: ' + data.name);
+          ok = true;
+        }
+
         if (ok) {
           Logger.log('処理成功: ' + data.name);
         } else {
@@ -56,6 +75,7 @@ function parseMail(body) {
   };
 
   const isDelete = /選考予定を削除しました/.test(body);
+  const isAssign = /選考予定にあなたをアサインしました/.test(body);
 
   const rawName = pick('応募者氏名');
   const name = rawName ? rawName.replace(/　/g, ' ') : null;
@@ -78,11 +98,27 @@ function parseMail(body) {
   const uuid = uuidMatch ? uuidMatch[1] : null;
 
   return {
-    name, start, url, uuid, isDelete,
+    name, start, url, uuid, isDelete, isAssign,
     format: pick('選考予定名'),
     position: pick('職種'),
     route: pick('応募経路'),
   };
+}
+
+// 面談日のカレンダー予定に該当UUIDを含むものがあるか（＝自分が担当か）
+function isMyInterview(data) {
+  if (!data.uuid || !data.start) {
+    Logger.log('UUIDまたは日時なし → 担当判定不可: ' + data.name);
+    return false;
+  }
+
+  const startDate = new Date(data.start);
+  const dayStart = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+
+  const events = CalendarApp.getDefaultCalendar().getEvents(dayStart, dayEnd);
+  const uuidRegex = new RegExp(data.uuid);
+  return events.some(event => uuidRegex.test(event.getDescription() || ''));
 }
 
 // Notion APIリクエストの共通処理
@@ -113,8 +149,16 @@ function findPageByUuid(token, dbId, uuid) {
   return result.results.length > 0 ? result.results[0].id : null;
 }
 
-// UUIDで照合し、あれば更新・なければ新規作成
-function upsertToNotion(token, dbId, data) {
+// UUIDで照合。あれば更新。無ければ allowCreate が true のときだけ新規作成
+function upsertToNotion(token, dbId, data, allowCreate) {
+  const existingPageId = data.uuid ? findPageByUuid(token, dbId, data.uuid) : null;
+
+  // 既存が無く、新規作成も許可されていない → 何もしない
+  if (!existingPageId && !allowCreate) {
+    Logger.log('既存なし＆新規作成しない設定のためスキップ: ' + data.name);
+    return true;
+  }
+
   const properties = {
     Name:     { title: [{ text: { content: data.name || '（氏名不明）' } }] },
     Url:      { url: data.url },
@@ -126,8 +170,6 @@ function upsertToNotion(token, dbId, data) {
   if (data.start) {
     properties.Date = { date: { start: data.start } };
   }
-
-  const existingPageId = data.uuid ? findPageByUuid(token, dbId, data.uuid) : null;
 
   const response = existingPageId
     ? notionFetch('patch', '/pages/' + existingPageId, token, { properties })
