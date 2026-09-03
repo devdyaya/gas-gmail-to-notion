@@ -39,9 +39,8 @@ function processAssignMails() {
           Logger.log('同一実行内で削除済みのためスキップ: ' + data.name);
           ok = true;
         } else if (isMyInterview(data)) {
-          // アサイン/変更 かつ 自分が担当
-          // アサインメールのときだけ新規作成を許可（変更は更新のみ）
-          ok = upsertToNotion(NOTION_TOKEN, NOTION_DB_ID, data, data.isAssign);
+          // 自分が担当（カレンダーに予定あり）→ 無ければ作る・あれば更新
+          ok = upsertToNotion(NOTION_TOKEN, NOTION_DB_ID, data, true);
         } else {
           // 担当外
           Logger.log('担当外のためスキップ: ' + data.name);
@@ -118,6 +117,7 @@ function isMyInterview(data) {
 
   const events = CalendarApp.getDefaultCalendar().getEvents(dayStart, dayEnd);
   const uuidRegex = new RegExp(data.uuid);
+  Logger.log(dayStart + 'の面談予定: ' + data.name);
   return events.some(event => uuidRegex.test(event.getDescription() || ''));
 }
 
