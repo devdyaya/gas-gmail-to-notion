@@ -14,12 +14,8 @@ function processAssignMails() {
               + '-label:' + LABEL_NAME;
   const threads = GmailApp.search(query);
 
-  if (threads.length === 0) {
-    Logger.log('対象メールなし');
-    return;
-  }
+  if (threads.length === 0) return;  // 対象なしは無言で終了
 
-  // この実行内でアーカイブしたUUIDを記録（同一実行内の復活防止）
   const archivedUuids = new Set();
 
   threads.forEach(thread => {
@@ -31,38 +27,23 @@ function processAssignMails() {
       if (data && data.name) {
         let ok;
         if (data.isDelete) {
-          // 削除 → アーカイブ
           ok = archiveFromNotion(NOTION_TOKEN, NOTION_DB_ID, data);
           if (data.uuid) archivedUuids.add(data.uuid);
         } else if (data.uuid && archivedUuids.has(data.uuid)) {
-          // この実行内で既に削除済みのUUID → 復活させない
-          Logger.log('同一実行内で削除済みのためスキップ: ' + data.name);
-          ok = true;
+          ok = true;  // 同一実行内で削除済み → 復活させない（正常系、無言）
         } else if (isMyInterview(data)) {
-          // 自分が担当（カレンダーに予定あり）→ 無ければ作る・あれば更新
           ok = upsertToNotion(NOTION_TOKEN, NOTION_DB_ID, data, true);
         } else {
-          // 担当外
-          Logger.log('担当外のためスキップ: ' + data.name);
-          ok = true;
+          ok = true;  // 担当外（正常系、無言）
         }
-
-        if (ok) {
-          Logger.log('処理成功: ' + data.name);
-        } else {
-          allOk = false;
-          Logger.log('処理失敗: ' + data.name);
-        }
+        if (!ok) allOk = false;
       } else {
         allOk = false;
-        Logger.log('パース失敗（スキップ）');
+        Logger.log('パース失敗: ' + (data && data.name ? data.name : '(氏名取得不可)'));
       }
     });
 
-    if (allOk) {
-      thread.addLabel(label);
-      Logger.log('ラベル付与 完了');
-    }
+    if (allOk) thread.addLabel(label);
   });
 }
 
@@ -79,7 +60,6 @@ function parseMail(body) {
   const rawName = pick('応募者氏名');
   const name = rawName ? rawName.replace(/　/g, ' ') : null;
 
-  // 日時：開始時刻のみ取得（末尾の「- HH:MM」で選考予定の日時行だと判別）
   const dateLine = pick('日時');
   let start = null;
   if (dateLine) {
@@ -106,10 +86,7 @@ function parseMail(body) {
 
 // 面談日のカレンダー予定に該当UUIDを含むものがあるか（＝自分が担当か）
 function isMyInterview(data) {
-  if (!data.uuid || !data.start) {
-    Logger.log('UUIDまたは日時なし → 担当判定不可: ' + data.name);
-    return false;
-  }
+  if (!data.uuid || !data.start) return false;  // 判定不可（無言、false）
 
   const startDate = new Date(data.start);
   const dayStart = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
@@ -117,7 +94,6 @@ function isMyInterview(data) {
 
   const events = CalendarApp.getDefaultCalendar().getEvents(dayStart, dayEnd);
   const uuidRegex = new RegExp(data.uuid);
-  Logger.log(dayStart + 'の面談予定: ' + data.name);
   return events.some(event => uuidRegex.test(event.getDescription() || ''));
 }
 
@@ -153,11 +129,7 @@ function findPageByUuid(token, dbId, uuid) {
 function upsertToNotion(token, dbId, data, allowCreate) {
   const existingPageId = data.uuid ? findPageByUuid(token, dbId, data.uuid) : null;
 
-  // 既存が無く、新規作成も許可されていない → 何もしない
-  if (!existingPageId && !allowCreate) {
-    Logger.log('既存なし＆新規作成しない設定のためスキップ: ' + data.name);
-    return true;
-  }
+  if (!existingPageId && !allowCreate) return true;  // 更新対象なし（正常系、無言）
 
   const properties = {
     Name:     { title: [{ text: { content: data.name || '（氏名不明）' } }] },
@@ -176,28 +148,26 @@ function upsertToNotion(token, dbId, data, allowCreate) {
     : notionFetch('post', '/pages', token, { parent: { database_id: dbId }, properties });
 
   const code = response.getResponseCode();
-  Logger.log('ステータス: ' + code + '（' + (existingPageId ? '更新' : '新規') + '）');
-  if (code === 200) return true;
-  Logger.log('エラー: ' + response.getContentText());
+  if (code === 200) {
+    Logger.log((existingPageId ? '更新' : '新規') + ': ' + data.name);
+    return true;
+  }
+  Logger.log('登録失敗(' + code + '): ' + data.name + ' / ' + response.getContentText());
   return false;
 }
 
 // UUIDで照合し、該当ページがあればアーカイブ
 function archiveFromNotion(token, dbId, data) {
-  if (!data.uuid) {
-    Logger.log('UUIDなし → アーカイブ不可（スキップ）');
-    return true;
-  }
+  if (!data.uuid) return true;  // UUIDなし（無言）
   const pageId = findPageByUuid(token, dbId, data.uuid);
-  if (!pageId) {
-    Logger.log('該当ページなし（既に無い or 未登録）: ' + data.name);
-    return true;
-  }
+  if (!pageId) return true;  // 対象なし（正常系、無言）
 
   const response = notionFetch('patch', '/pages/' + pageId, token, { archived: true });
   const code = response.getResponseCode();
-  Logger.log('ステータス: ' + code + '（アーカイブ）: ' + data.name);
-  if (code === 200) return true;
-  Logger.log('エラー: ' + response.getContentText());
+  if (code === 200) {
+    Logger.log('アーカイブ: ' + data.name);
+    return true;
+  }
+  Logger.log('アーカイブ失敗(' + code + '): ' + data.name + ' / ' + response.getContentText());
   return false;
 }
